@@ -1700,11 +1700,21 @@ exports.getAllBookings = async (req, res) => {
       const customerIds = customers.map(c => c._id);
       const driverIds = drivers.map(d => d._id);
 
-      query.$or = [
+      const orConditions = [
         { customerId: { $in: customerIds } },
         { driverId: { $in: driverIds } },
-        { _id: { $regex: search, $options: 'i' } }
+        { fromCity: { $regex: search, $options: 'i' } },
+        { toCity: { $regex: search, $options: 'i' } },
+        { carModel: { $regex: search, $options: 'i' } },
+        { carNumber: { $regex: search, $options: 'i' } }
       ];
+
+      const mongoose = require('mongoose');
+      if (mongoose.Types.ObjectId.isValid(search)) {
+        orConditions.push({ _id: new mongoose.Types.ObjectId(search) });
+      }
+
+      query.$or = orConditions;
     }
 
     const bookings = await Ride.find(query)
@@ -1859,6 +1869,44 @@ exports.getAllBookings = async (req, res) => {
         }
       }
 
+      // Parse car features safely from MongoDB array, string, or json
+      let carFeatures = [];
+      if (Array.isArray(booking.carFeatures) && booking.carFeatures.length > 0) {
+        carFeatures = booking.carFeatures.flatMap(f => typeof f === 'string' ? f.split(',').map(s => s.trim()) : [String(f)]).filter(Boolean);
+      } else if (typeof booking.carFeatures === 'string' && booking.carFeatures.trim().length > 0) {
+        try {
+          const parsed = JSON.parse(booking.carFeatures);
+          carFeatures = Array.isArray(parsed) ? parsed.map(s => String(s).trim()).filter(Boolean) : [booking.carFeatures.trim()];
+        } catch (e) {
+          carFeatures = booking.carFeatures.split(',').map(s => s.trim()).filter(Boolean);
+        }
+      }
+
+      // Fallback to preferences if carFeatures is empty
+      if (carFeatures.length === 0 && booking.preferences) {
+        if (booking.preferences.acAvailable) carFeatures.push('AC');
+        if (booking.preferences.musicAllowed) carFeatures.push('Music System');
+        if (booking.preferences.luggageSpace) carFeatures.push('Luggage Space');
+        if (booking.preferences.petsAllowed) carFeatures.push('Pet Friendly');
+        if (booking.preferences.chattingAllowed) carFeatures.push('Chat Friendly');
+      }
+
+      // Format totalSeats and availableSeats
+      let totalSeats = null;
+      if (booking.totalSeats !== undefined && booking.totalSeats !== null && !isNaN(Number(booking.totalSeats))) {
+        totalSeats = Number(booking.totalSeats);
+      } else if (booking.role === 'cab_ride') {
+        totalSeats = 4;
+      }
+
+      let availableSeats = null;
+      if (booking.availableSeats !== undefined && booking.availableSeats !== null && !isNaN(Number(booking.availableSeats))) {
+        availableSeats = Number(booking.availableSeats);
+      } else if (totalSeats !== null) {
+        const bookedCount = (booking.bookedPassengers?.length || 0) || (booking.bookings?.length || 0);
+        availableSeats = Math.max(0, totalSeats - bookedCount);
+      }
+
       return {
         _id: booking._id,
         rideType: booking.role === 'cab_ride' ? 'cab' : 'goods',
@@ -1888,7 +1936,15 @@ exports.getAllBookings = async (req, res) => {
         mainRoute: mainRoute,
         isRental: isRental,
         startDate: rentalStartDate,
-        endDate: rentalEndDate
+        endDate: rentalEndDate,
+        totalSeats: totalSeats,
+        availableSeats: availableSeats,
+        carFeatures: carFeatures,
+        carModel: booking.carModel || '',
+        carNumber: booking.carNumber || '',
+        carColor: booking.carColor || '',
+        totalCapacity: booking.totalCapacity || 0,
+        availableCapacity: booking.availableCapacity || 0
       };
     });
 
@@ -1999,6 +2055,11 @@ exports.exportBookings = async (req, res) => {
       'Driver Phone': b.driverId?.phone || 'N/A',
       'From': b.fromCity || 'N/A',
       'To': b.toCity || 'N/A',
+      'Total Seats': b.totalSeats !== undefined && b.totalSeats !== null ? b.totalSeats : (b.role === 'cab_ride' ? 4 : 'N/A'),
+      'Available Seats': b.availableSeats !== undefined && b.availableSeats !== null ? b.availableSeats : (b.role === 'cab_ride' ? 4 : 'N/A'),
+      'Car Features': Array.isArray(b.carFeatures) ? b.carFeatures.join(', ') : (b.carFeatures || 'None'),
+      'Car Model': b.carModel || 'N/A',
+      'Car Number': b.carNumber || 'N/A',
       'Amount': b.price || 0,
       'Status': b.status,
       'Date': new Date(b.createdAt).toLocaleString()
@@ -2541,7 +2602,13 @@ exports.getCancelledRides = async (req, res) => {
         passengerDetails: passengerDetails,
         mainRoute: mainRoute,
         startDate: rentalStartDate,
-        endDate: rentalEndDate
+        endDate: rentalEndDate,
+        totalSeats: ride.totalSeats !== undefined && ride.totalSeats !== null ? ride.totalSeats : (ride.role === 'cab_ride' ? 4 : null),
+        availableSeats: ride.availableSeats !== undefined && ride.availableSeats !== null ? ride.availableSeats : (ride.role === 'cab_ride' ? 4 : null),
+        carFeatures: Array.isArray(ride.carFeatures) ? ride.carFeatures : (ride.carFeatures ? [ride.carFeatures] : []),
+        carModel: ride.carModel || '',
+        carNumber: ride.carNumber || '',
+        carColor: ride.carColor || ''
       };
     });
 
