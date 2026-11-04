@@ -16,20 +16,33 @@ connectDB().then(() => {
     const Admin = require('./models/Admin');
     const mongoose = require('mongoose');
     const adminId = '69d8d397c9f7b178ee5d56b0';
-    Admin.findById(adminId).then(exists => {
+    const adminEmail = 'admin@dumpdrop.com';
+
+    Admin.findOne({
+        $or: [
+            { _id: mongoose.Types.ObjectId.isValid(adminId) ? adminId : null },
+            { email: adminEmail }
+        ]
+    }).then(exists => {
         if (!exists) {
             Admin.create({
                 _id: new mongoose.Types.ObjectId(adminId),
                 name: 'Super Admin',
-                email: 'admin@dumpdrop.com',
+                email: adminEmail,
                 password: 'Admin@123',
                 role: 'super_admin',
                 isActive: true,
             }).then(() => {
-                console.log('✅ Auto-Seeded Admin ID: 69d8d397c9f7b178ee5d56b0');
+                console.log(`✅ Auto-Seeded Admin ID: ${adminId}`);
             }).catch(err => {
-                console.error('❌ Auto-Seed Admin failed:', err.message);
+                if (err.code === 11000) {
+                    console.log(`ℹ️ Admin already exists (${adminEmail})`);
+                } else {
+                    console.error('❌ Auto-Seed Admin failed:', err.message);
+                }
             });
+        } else {
+            console.log(`ℹ️ Admin already exists (${exists.email})`);
         }
     }).catch(err => {
         console.error('❌ Auto-Seed Admin check failed:', err.message);

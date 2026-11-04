@@ -22,7 +22,7 @@ const createAdmin = async () => {
             await Admin.create({
                 name: 'Super Admin',
                 email: 'admin@dumpdrop.com',
-                password: '',
+                password: 'Admin@123',
                 role: 'super_admin',
                 isActive: true,
             });
