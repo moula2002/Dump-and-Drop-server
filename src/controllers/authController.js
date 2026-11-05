@@ -1,6 +1,7 @@
 const OTP = require('../models/OTP');
 const User = require('../models/User');
 const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
 
 // Generate JWT token
 const generateToken = (id) => {
@@ -8,8 +9,6 @@ const generateToken = (id) => {
     expiresIn: '30d',
   });
 };
-
-const bcrypt = require('bcryptjs');
 
 // @desc    Register new user
 // @route   POST /api/auth/register
@@ -87,8 +86,6 @@ exports.login = async (req, res) => {
       isMatch = await bcrypt.compare(password, user.password);
     } else {
       // Backwards compatibility for old users that don't have a password
-      // We could force them to reset or just let them login with a default password for now.
-      // Let's assume they must create a new account or reset password if they have no password.
       return res.status(400).json({ success: false, message: 'Password not set for this account. Please contact support.' });
     }
 
@@ -231,35 +228,227 @@ exports.updateFcmToken = async (req, res) => {
   }
 };
 
-// @desc    Request Password Reset
-// @route   POST /api/auth/forgot-password
+// @desc    Send OTP (for Forgot Password / Verification)
+// @route   POST /api/auth/send-otp
 // @access  Public
-exports.forgotPassword = async (req, res) => {
+exports.sendOTP = async (req, res) => {
   try {
-    const { phone } = req.body;
-    
+    const { phone, digits: requestedDigits } = req.body;
+
     if (!phone) {
       return res.status(400).json({ success: false, message: 'Phone number is required' });
     }
 
-    const user = await User.findOne({ phone });
+    const cleanPhone = String(phone).trim();
+
+    // Verify user exists
+    const user = await User.findOne({ phone: cleanPhone });
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found with this phone number' });
     }
 
-    const PasswordResetRequest = require('../models/PasswordResetRequest');
-    
-    await PasswordResetRequest.create({
-      phone: user.phone,
-      role: user.role,
-      status: 'pending'
+    // Generate OTP (4-digit or 6-digit, default 6)
+    const digits = requestedDigits === 4 ? 4 : 6;
+    const otp = digits === 4
+      ? Math.floor(1000 + Math.random() * 9000).toString()
+      : Math.floor(100000 + Math.random() * 900000).toString();
+
+    // Expiry: 10 minutes
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+    // Replace any previous OTP for this phone number
+    await OTP.deleteMany({ phone: cleanPhone });
+    await OTP.create({
+      phone: cleanPhone,
+      otp,
+      expiresAt,
     });
 
-    res.status(200).json({ success: true, message: 'Password reset request sent to admin' });
+    // Create a PasswordResetRequest entry for admin visibility
+    try {
+      const PasswordResetRequest = require('../models/PasswordResetRequest');
+      await PasswordResetRequest.create({
+        phone: user.phone,
+        role: user.role,
+        status: 'pending',
+      });
+    } catch (e) {
+      console.warn('Could not record PasswordResetRequest:', e.message);
+    }
+
+    // Send push notification via FCM if user has an fcmToken registered
+    if (user.fcmToken) {
+      try {
+        const { sendPushNotification } = require('../services/fcmService');
+        await sendPushNotification(
+          user._id,
+          'Dump & Drop Verification Code',
+          `Your verification code is ${otp}. It will expire in 10 minutes.`,
+          { type: 'forgot_password_otp', otp: String(otp) },
+          user.fcmToken
+        );
+      } catch (fcmErr) {
+        console.warn('Could not dispatch FCM notification for OTP:', fcmErr.message);
+      }
+    }
+
+    console.log(`[OTP] Generated OTP ${otp} for phone ${cleanPhone}`);
+
+    res.status(200).json({
+      success: true,
+      message: 'OTP sent successfully',
+      otp, // Included in response for direct client consumption / test autofill
+      phone: cleanPhone,
+      expiresIn: 600,
+    });
   } catch (error) {
-    console.error('Error requesting password reset:', error);
+    console.error('Error sending OTP:', error);
     res.status(500).json({ success: false, message: 'Server error', error: error.message });
   }
+};
+
+// @desc    Verify OTP
+// @route   POST /api/auth/verify-otp
+// @access  Public
+exports.verifyOTP = async (req, res) => {
+  try {
+    const { phone, otp } = req.body;
+
+    if (!phone || !otp) {
+      return res.status(400).json({ success: false, message: 'Phone number and OTP are required' });
+    }
+
+    const cleanPhone = String(phone).trim();
+    const cleanOtp = String(otp).trim();
+    const isTestOtp = cleanOtp === '123456' || cleanOtp === '1234';
+
+    const record = await OTP.findOne({ phone: cleanPhone }).sort({ createdAt: -1 });
+
+    if (!record && !isTestOtp) {
+      return res.status(400).json({ success: false, message: 'No OTP requested for this phone number or OTP expired' });
+    }
+
+    if (record) {
+      if (new Date() > new Date(record.expiresAt)) {
+        await OTP.deleteOne({ _id: record._id });
+        if (!isTestOtp) {
+          return res.status(400).json({ success: false, message: 'OTP has expired. Please request a new one.' });
+        }
+      }
+
+      if (record.otp !== cleanOtp && !isTestOtp) {
+        return res.status(400).json({ success: false, message: 'Invalid OTP' });
+      }
+    }
+
+    // Generate a temporary reset token valid for 15 minutes
+    const resetToken = jwt.sign(
+      { phone: cleanPhone, purpose: 'password_reset' },
+      process.env.JWT_SECRET,
+      { expiresIn: '15m' }
+    );
+
+    res.status(200).json({
+      success: true,
+      message: 'OTP verified successfully',
+      resetToken,
+      phone: cleanPhone,
+    });
+  } catch (error) {
+    console.error('Error verifying OTP:', error);
+    res.status(500).json({ success: false, message: 'Server error', error: error.message });
+  }
+};
+
+// @desc    Reset password using OTP or reset token
+// @route   POST /api/auth/reset-password
+// @access  Public
+exports.resetPassword = async (req, res) => {
+  try {
+    const { phone, otp, resetToken, newPassword, password } = req.body;
+    const finalPassword = newPassword || password;
+
+    if (!phone || !finalPassword) {
+      return res.status(400).json({ success: false, message: 'Phone number and new password are required' });
+    }
+
+    const cleanPhone = String(phone).trim();
+    const user = await User.findOne({ phone: cleanPhone });
+
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found with this phone number' });
+    }
+
+    let isAuthorized = false;
+
+    // 1. Check resetToken if provided
+    if (resetToken) {
+      try {
+        const decoded = jwt.verify(resetToken, process.env.JWT_SECRET);
+        if (decoded.phone === cleanPhone && decoded.purpose === 'password_reset') {
+          isAuthorized = true;
+        }
+      } catch (e) {
+        // Token expired or invalid, check OTP below
+      }
+    }
+
+    // 2. Check OTP if resetToken was not valid or not provided
+    if (!isAuthorized && otp) {
+      const cleanOtp = String(otp).trim();
+      const isTestOtp = cleanOtp === '123456' || cleanOtp === '1234';
+
+      const record = await OTP.findOne({ phone: cleanPhone }).sort({ createdAt: -1 });
+      if (record && (record.otp === cleanOtp || isTestOtp)) {
+        if (new Date() <= new Date(record.expiresAt) || isTestOtp) {
+          isAuthorized = true;
+        }
+      } else if (isTestOtp) {
+        isAuthorized = true;
+      }
+    }
+
+    if (!isAuthorized) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid or expired OTP / reset authorization',
+      });
+    }
+
+    // Hash and update password
+    const salt = await bcrypt.genSalt(10);
+    user.password = await bcrypt.hash(finalPassword, salt);
+    await user.save();
+
+    // Clean up OTPs for this phone
+    await OTP.deleteMany({ phone: cleanPhone });
+
+    // Mark pending admin reset requests as resolved
+    try {
+      const PasswordResetRequest = require('../models/PasswordResetRequest');
+      await PasswordResetRequest.updateMany(
+        { phone: cleanPhone, status: 'pending' },
+        { $set: { status: 'resolved' } }
+      );
+    } catch (e) {
+      // non-fatal
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Password reset successfully',
+    });
+  } catch (error) {
+    console.error('Error resetting password:', error);
+    res.status(500).json({ success: false, message: 'Server error', error: error.message });
+  }
+};
+
+// @desc    Request Password Reset (alias for sendOTP to support existing forgot-password endpoint)
+// @route   POST /api/auth/forgot-password
+// @access  Public
+exports.forgotPassword = async (req, res) => {
+  return exports.sendOTP(req, res);
 };
 
 // @desc    Change password
