@@ -9,9 +9,11 @@ const {
   getUserDetails,
   getUserById,
   updateUserStatus,
+  deleteUser,
   getDrivers,
   getDriverById,
   verifyDriver,
+  deleteDriver,
   getRides,
   adminCancelRide,
   getSettings,
@@ -66,11 +68,13 @@ router.get('/dashboard/revenue', getRevenueData);
 router.get('/users', getUsers);
 router.get('/users/:id', getUserById);
 router.put('/users/:id/status', updateUserStatus);
+router.delete('/users/:id', deleteUser);
 
 // Drivers
 router.get('/drivers', getDrivers);
 router.get('/drivers/:id', getDriverById);
 router.put('/drivers/:id/verify', verifyDriver);
+router.delete('/drivers/:id', deleteDriver);
 
 // Rides
 router.get('/rides', getRides);

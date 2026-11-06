@@ -553,6 +553,53 @@ exports.updateUserStatus = async (req, res) => {
   }
 };
 
+// @desc    Delete user / customer
+// @route   DELETE /api/admin/users/:id
+exports.deleteUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id || id === 'undefined') {
+      return res.status(400).json({ success: false, message: 'Invalid user ID' });
+    }
+
+    const user = await User.findById(id);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    // Check if user has an active ongoing ride
+    const activeRide = await Ride.findOne({
+      $or: [{ userId: id }, { customerId: id }],
+      status: { $in: ['accepted', 'ongoing', 'arrived', 'started'] }
+    });
+
+    if (activeRide) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot delete customer with an active ride in progress'
+      });
+    }
+
+    // Delete associated customer profiles, driver profiles, wallets, notifications
+    await CustomerProfile.deleteMany({ userId: id });
+    await CabDriverProfile.deleteMany({ userId: id });
+    await GoodsDriverProfile.deleteMany({ userId: id });
+    await Wallet.deleteMany({ $or: [{ userId: id }, { driverId: id }] });
+    await Notification.deleteMany({ $or: [{ toUserId: id }, { fromUserId: id }] });
+    await PasswordResetRequest.deleteMany({ userId: id });
+
+    await User.findByIdAndDelete(id);
+
+    res.json({
+      success: true,
+      message: 'Customer deleted successfully'
+    });
+  } catch (error) {
+    console.error('Delete user error:', error);
+    res.status(500).json({ success: false, message: 'Server error', error: error.message });
+  }
+};
+
 // @desc    Get all drivers
 exports.getDrivers = async (req, res) => {
   try {
@@ -672,6 +719,74 @@ exports.verifyDriver = async (req, res) => {
   } catch (error) {
     console.error('Verify driver error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// @desc    Delete driver
+// @route   DELETE /api/admin/drivers/:id
+exports.deleteDriver = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id || id === 'undefined') {
+      return res.status(400).json({ success: false, message: 'Invalid driver ID' });
+    }
+
+    // The id could be a CabDriverProfile / GoodsDriverProfile _id or User _id
+    let cabDriver = await CabDriverProfile.findOne({
+      $or: [{ _id: id }, { userId: id }]
+    });
+    let goodsDriver = await GoodsDriverProfile.findOne({
+      $or: [{ _id: id }, { userId: id }]
+    });
+
+    const driverProfile = cabDriver || goodsDriver;
+    const userId = driverProfile?.userId || id;
+
+    // Verify if either profile or user exists
+    const user = await User.findById(userId);
+    if (!driverProfile && !user) {
+      return res.status(404).json({ success: false, message: 'Driver not found' });
+    }
+
+    // Check if driver has an active ongoing ride
+    const activeRide = await Ride.findOne({
+      driverId: userId,
+      status: { $in: ['accepted', 'ongoing', 'arrived', 'started'] }
+    });
+
+    if (activeRide) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot delete driver with an active ride in progress'
+      });
+    }
+
+    // Delete driver profiles
+    await CabDriverProfile.deleteMany({
+      $or: [{ _id: id }, { userId: userId }]
+    });
+    await GoodsDriverProfile.deleteMany({
+      $or: [{ _id: id }, { userId: userId }]
+    });
+    await Wallet.deleteMany({
+      $or: [{ userId: userId }, { driverId: userId }]
+    });
+    await Notification.deleteMany({
+      $or: [{ toUserId: userId }, { fromUserId: userId }]
+    });
+
+    // Delete user account if found
+    if (user) {
+      await User.findByIdAndDelete(userId);
+    }
+
+    res.json({
+      success: true,
+      message: 'Driver deleted successfully'
+    });
+  } catch (error) {
+    console.error('Delete driver error:', error);
+    res.status(500).json({ success: false, message: 'Server error', error: error.message });
   }
 };
 
